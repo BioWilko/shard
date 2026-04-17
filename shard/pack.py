@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,10 @@ from .manifest import (
 from .validate import sha256_file
 
 DEFAULT_PLATFORMS = ["linux/amd64", "linux/arm64"]
-_MANIFEST_LIST_MEDIA_TYPE = "application/vnd.docker.distribution.manifest.list.v2+json"
+_MANIFEST_LIST_MEDIA_TYPES = {
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.index.v1+json",
+}
 
 
 class PackError(RuntimeError):
@@ -48,11 +53,40 @@ def pack(spec_path: Path, out_dir: Path) -> Path:
         containers_dir.mkdir()
         data_dir.mkdir()
 
+        t0 = time.time()
         workflow_entry = _bundle_workflow(spec["workflow"], name, workflow_dir)
+        bundle_size = _human_size(
+            (workflow_dir / Path(workflow_entry.path).name).stat().st_size
+        )
+        print(
+            f"[workflow] bundled {workflow_entry.git_commit[:12]} ({bundle_size}) in {time.time()-t0:.1f}s"
+        )
+
+        n_images = len(spec.get("containers", []))
+        n_platforms = len(target_platforms)
+        print(
+            f"[containers] pulling {n_images} image(s) x {n_platforms} platform(s)..."
+        )
+        t0 = time.time()
         container_entries = _save_containers_multiarch(
             spec.get("containers", []), containers_dir, target_platforms
         )
+        containers_size = _human_size(
+            sum(f.stat().st_size for f in containers_dir.rglob("*") if f.is_file())
+        )
+        print(
+            f"[containers] saved {n_images} image(s) ({containers_size}) in {time.time()-t0:.1f}s"
+        )
+
+        t0 = time.time()
         data_entries = _copy_data(spec.get("data", []), data_dir)
+        n_files = sum(len(e.files) for e in data_entries)
+        data_size = _human_size(
+            sum(f.stat().st_size for f in data_dir.rglob("*") if f.is_file())
+        )
+        print(
+            f"[data] copied {len(data_entries)} entr{'y' if len(data_entries) == 1 else 'ies'}, {n_files} file(s) ({data_size}) in {time.time()-t0:.1f}s"
+        )
 
         manifest = Manifest(
             shard_spec_version=SHARD_SPEC_VERSION,
@@ -68,7 +102,16 @@ def pack(spec_path: Path, out_dir: Path) -> Path:
 
         safe_name = name.replace("/", "-")
         archive_path = out_dir / f"{safe_name}-{version}.shard"
+        staging_size = _human_size(
+            sum(f.stat().st_size for f in staging.rglob("*") if f.is_file())
+        )
+        print(f"[archive] compressing {staging_size} of staged content...")
+        t0 = time.time()
         _create_archive(staging, archive_path)
+        archive_size = _human_size(archive_path.stat().st_size)
+        print(
+            f"[archive] wrote {archive_path.name} ({archive_size}) in {time.time()-t0:.1f}s"
+        )
 
     return archive_path
 
@@ -123,13 +166,22 @@ def _save_containers_multiarch(
     dest: Path,
     target_platforms: list[str],
 ) -> list[ContainerEntry]:
-    entries = []
-    for image in images:
+    if not images:
+        return []
+
+    def _save_one(image: str) -> ContainerEntry:
         platforms = _save_image_multiarch(image, dest, target_platforms)
         if not platforms:
             raise PackError(f"No platform variants saved for {image!r}")
-        entries.append(ContainerEntry(image=image, platforms=platforms))
-    return entries
+        return ContainerEntry(image=image, platforms=platforms)
+
+    with ThreadPoolExecutor(max_workers=len(images)) as pool:
+        futures = {pool.submit(_save_one, img): img for img in images}
+        results: dict[str, ContainerEntry] = {}
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+
+    return [results[img] for img in images]
 
 
 def _save_image_multiarch(
@@ -153,7 +205,7 @@ def _save_image_multiarch(
 
     media_type = manifest_data.get("mediaType", "")
 
-    if media_type == _MANIFEST_LIST_MEDIA_TYPE:
+    if media_type in _MANIFEST_LIST_MEDIA_TYPES:
         return _save_manifest_list(image, manifest_data, dest, target_platforms)
     else:
         return _save_single_arch(image, dest, target_platforms)
@@ -166,29 +218,35 @@ def _save_manifest_list(
     target_platforms: list[str],
 ) -> dict[str, PlatformEntry]:
     target_arches = {p.split("/")[1] for p in target_platforms if "/" in p}
-    platform_entries: dict[str, PlatformEntry] = {}
 
+    targets = []
     for m in manifest_data.get("manifests", []):
         platform = m.get("platform", {})
         os_ = platform.get("os", "")
         arch = platform.get("architecture", "")
         if os_ != "linux" or arch not in target_arches:
             continue
+        targets.append((arch, m["digest"]))
 
-        digest = m["digest"]
-        platform_key = f"linux/{arch}"
+    def _save_platform(arch: str, digest: str) -> tuple[str, PlatformEntry]:
+        ref = f"{image}@{digest}"
         safe_name = _image_to_filename(image, arch)
         tar_path = dest / safe_name
-
-        _docker_run(["pull", f"{image}@{digest}"])
-        _docker_run(["tag", f"{image}@{digest}", image])
-        _docker_run(["save", image, "-o", str(tar_path)])
-        _docker_run(["rmi", image])
-
-        platform_entries[platform_key] = PlatformEntry(
+        _docker_run(["pull", ref])
+        _docker_run(["save", ref, "-o", str(tar_path)])
+        return f"linux/{arch}", PlatformEntry(
             path=f"containers/{safe_name}",
             sha256=sha256_file(tar_path),
         )
+
+    platform_entries: dict[str, PlatformEntry] = {}
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        futures = [
+            pool.submit(_save_platform, arch, digest) for arch, digest in targets
+        ]
+        for fut in as_completed(futures):
+            platform_key, entry = fut.result()
+            platform_entries[platform_key] = entry
 
     missing = [p for p in target_platforms if p not in platform_entries]
     for p in missing:
@@ -229,10 +287,17 @@ def _save_single_arch(
     }
 
 
-def _docker_run(args: list[str]) -> None:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise PackError(f"docker {args[0]} failed:\n{result.stderr}")
+def _docker_run(args: list[str], retries: int = 3) -> None:
+    for attempt in range(retries):
+        result = subprocess.run(["docker", *args], capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        if attempt < retries - 1:
+            print(
+                f"warning: docker {args[0]} failed (attempt {attempt + 1}/{retries}), retrying..."
+            )
+            time.sleep(2**attempt)
+    raise PackError(f"docker {args[0]} failed:\n{result.stderr}")
 
 
 def _copy_data(data_specs: list[dict[str, Any]], dest: Path) -> list[DataEntry]:
@@ -274,11 +339,41 @@ def _collect_files(root: Path, base: Path) -> list[DataFile]:
     return files
 
 
+def _human_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def _create_archive(staging: Path, out: Path) -> None:
-    with tarfile.open(out, "w:gz") as tf:
-        for item in sorted(staging.rglob("*")):
-            arcname = item.relative_to(staging)
-            tf.add(item, arcname=str(arcname))
+    compressor = shutil.which("pigz") or shutil.which("gzip")
+    if compressor is None:
+        raise PackError("pigz or gzip not found on PATH")
+
+    cmd = [compressor]
+    if "pigz" in compressor:
+        import os
+
+        cmd += ["-p", str(os.cpu_count() or 1)]
+
+    with out.open("wb") as outf:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=outf)
+        assert proc.stdin is not None
+        try:
+            with tarfile.open(fileobj=proc.stdin, mode="w|") as tf:
+                for item in sorted(
+                    staging.rglob("*"),
+                    key=lambda p: (p.name != "manifest.json", str(p)),
+                ):
+                    arcname = item.relative_to(staging)
+                    tf.add(item, arcname=str(arcname))
+        finally:
+            proc.stdin.close()
+        proc.wait()
+        if proc.returncode != 0:
+            raise PackError(f"{compressor} failed with exit code {proc.returncode}")
 
 
 def _git(args: list[str], cwd: Path) -> str:

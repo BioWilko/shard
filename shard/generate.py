@@ -57,6 +57,7 @@ def generate(repo_path: Path, data_path: Path | None = None) -> tuple[dict[str, 
     resolved = repo_path.resolve()
     workflow_path = "." if resolved == Path.cwd() else str(resolved)
     spec["workflow"] = {"path": workflow_path, "ref": "HEAD"}
+    spec["platforms"] = ["linux/amd64", "linux/arm64"]
     spec["containers"] = containers
     if unresolved:
         spec["unresolved_containers"] = unresolved

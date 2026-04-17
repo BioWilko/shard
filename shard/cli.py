@@ -55,14 +55,20 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"error: archive not found: {archive}", file=sys.stderr)
         return 1
     try:
-        with tarfile.open(archive, "r:gz") as tf:
-            member = tf.getmember("manifest.json")
-            fh = tf.extractfile(member)
-            if fh is None:
-                print("error: manifest.json is empty", file=sys.stderr)
-                return 1
-            text = fh.read().decode()
-    except (tarfile.TarError, KeyError) as exc:
+        text = None
+        with tarfile.open(archive, "r|gz") as tf:
+            for member in tf:
+                if member.name == "manifest.json":
+                    fh = tf.extractfile(member)
+                    if fh is None:
+                        print("error: manifest.json is empty", file=sys.stderr)
+                        return 1
+                    text = fh.read().decode()
+                    break
+        if text is None:
+            print("error: manifest.json not found in archive", file=sys.stderr)
+            return 1
+    except tarfile.TarError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
