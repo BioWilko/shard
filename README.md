@@ -2,7 +2,7 @@
 
 A distribution format and tooling for packaging Nextflow workflows as single self-contained `.shard` files. A `.shard` archive bundles the workflow git repository, Docker container images (multi-arch), and runtime data dependencies so workflows can be installed and run fully offline.
 
-Designed to work with Glacier, a bioinformatics workflow language executor that consumes `.shard` archives.
+Designed to work with Glacier, a graphical bioinformatics workflow language executor.
 
 ## Quick start
 
