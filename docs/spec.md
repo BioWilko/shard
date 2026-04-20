@@ -41,59 +41,59 @@ All paths inside the archive are relative (no leading `/`).
 
 ### Top-level fields
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `shard_spec_version` | integer | yes | Format version. Currently `1`. |
-| `name` | string | yes | Workflow name. |
-| `version` | string | yes | Workflow version. |
-| `created_at` | string | yes | ISO 8601 UTC timestamp of archive creation. |
-| `description` | string | no | Human-readable description. |
-| `workflow` | object | yes | See below. |
-| `containers` | array | no | List of container entries. May be empty. |
-| `data` | array | no | List of data entries. May be empty. |
+| Field                | Type    | Required | Description                                 |
+| -------------------- | ------- | -------- | ------------------------------------------- |
+| `shard_spec_version` | integer | yes      | Format version. Currently `1`.              |
+| `name`               | string  | yes      | Workflow name.                              |
+| `version`            | string  | yes      | Workflow version.                           |
+| `created_at`         | string  | yes      | ISO 8601 UTC timestamp of archive creation. |
+| `description`        | string  | no       | Human-readable description.                 |
+| `workflow`           | object  | yes      | See below.                                  |
+| `containers`         | array   | no       | List of container entries. May be empty.    |
+| `data`               | array   | no       | List of data entries. May be empty.         |
 
 ### `workflow` object
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Archive-relative path to the git bundle. |
-| `sha256` | string | yes | Lowercase hex SHA-256 of the bundle file. |
-| `git_commit` | string | yes | Full 40-character git commit SHA. |
-| `git_ref` | string | yes | Tag, branch, or `HEAD` used when bundling. |
+| Field        | Type   | Required | Description                                |
+| ------------ | ------ | -------- | ------------------------------------------ |
+| `path`       | string | yes      | Archive-relative path to the git bundle.   |
+| `sha256`     | string | yes      | Lowercase hex SHA-256 of the bundle file.  |
+| `git_commit` | string | yes      | Full 40-character git commit SHA.          |
+| `git_ref`    | string | yes      | Tag, branch, or `HEAD` used when bundling. |
 
 ### `containers[]` objects
 
 Each container entry records one or more platform-specific image tarballs:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `image` | string | yes | Full Docker image reference (e.g. `artic/fieldbioinformatics:1.10.0`). |
-| `platforms` | object | yes | Map from platform key to platform entry (see below). |
+| Field       | Type   | Required | Description                                                            |
+| ----------- | ------ | -------- | ---------------------------------------------------------------------- |
+| `image`     | string | yes      | Full Docker image reference (e.g. `artic/fieldbioinformatics:1.10.0`). |
+| `platforms` | object | yes      | Map from platform key to platform entry (see below).                   |
 
 Platform keys are of the form `linux/amd64` or `linux/arm64`.
 
 #### `containers[].platforms[<platform>]` objects
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Archive-relative path to the Docker image tar for this platform. |
-| `sha256` | string | yes | Lowercase hex SHA-256 of the image tar. |
+| Field    | Type   | Required | Description                                                      |
+| -------- | ------ | -------- | ---------------------------------------------------------------- |
+| `path`   | string | yes      | Archive-relative path to the Docker image tar for this platform. |
+| `sha256` | string | yes      | Lowercase hex SHA-256 of the image tar.                          |
 
 ### `data[]` objects
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Human-readable data entry name. |
-| `path` | string | yes | Archive-relative path to the data directory. |
-| `destination` | string | yes | Install-time destination path. May contain `$GLACIER_DIR`. |
-| `files` | array | yes | Per-file integrity records (see below). |
+| Field         | Type   | Required | Description                                                |
+| ------------- | ------ | -------- | ---------------------------------------------------------- |
+| `name`        | string | yes      | Human-readable data entry name.                            |
+| `path`        | string | yes      | Archive-relative path to the data directory.               |
+| `destination` | string | yes      | Install-time destination path. May contain `$GLACIER_DIR`. |
+| `files`       | array  | yes      | Per-file integrity records (see below).                    |
 
 ### `data[].files[]` objects
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Path relative to the data entry's `path`. |
-| `sha256` | string | yes | Lowercase hex SHA-256 of the file. |
+| Field    | Type   | Required | Description                               |
+| -------- | ------ | -------- | ----------------------------------------- |
+| `path`   | string | yes      | Path relative to the data entry's `path`. |
+| `sha256` | string | yes      | Lowercase hex SHA-256 of the file.        |
 
 ### Example manifest.json
 
@@ -107,7 +107,7 @@ Platform keys are of the form `linux/amd64` or `linux/arm64`.
   "workflow": {
     "path": "workflow/amplicon-nf.bundle",
     "sha256": "a3f2...",
-    "git_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "git_commit": "b1234sc...",
     "git_ref": "v1.0.0"
   },
   "containers": [
