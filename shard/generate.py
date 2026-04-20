@@ -19,6 +19,8 @@ _DOCKER_RE = re.compile(
 )
 _BAD_SCHEMES = ("https://", "oras://", "shub://", "docker://")
 
+_INCLUDE_CONFIG_RE = re.compile(r"""^\s*includeConfig\s+['"]([^'"]+)['"]""", re.MULTILINE)
+
 _CONTAINER_LITERAL = re.compile(r"""\bcontainer\s+['"]([^'"]+)['"]""")
 _INTERP_VAR = re.compile(r"\$\{([^}]+)\}")
 # Matches container "..." blocks where the string spans multiple lines (nf-core ternary pattern).
@@ -111,14 +113,22 @@ def _git_latest_tag(repo_path: Path) -> str:
     return ""
 
 
+_DOCKER_REGISTRY_RE = re.compile(r"""docker\.registry\s*=\s*['"]([^'"]+)['"]""")
+
+
 def _detect_docker_registry(repo_path: Path, parser: NextflowConfigParser) -> str:
     config_path = repo_path / "nextflow.config"
-    if config_path.exists():
-        blocks = parser.parse(config_path.read_text())
-        docker_block = blocks.get("docker", {})
-        if isinstance(docker_block, dict):
-            return docker_block.get("registry", "")
-    return ""
+    if not config_path.exists():
+        return ""
+    text = config_path.read_text()
+    # Structured parse covers top-level docker.registry = '...' assignments.
+    blocks = parser.parse(text)
+    docker_block = blocks.get("docker", {})
+    if isinstance(docker_block, dict) and docker_block.get("registry"):
+        return docker_block["registry"]
+    # Regex fallback for docker.registry inside nested blocks (e.g. profiles).
+    m = _DOCKER_REGISTRY_RE.search(text)
+    return m.group(1) if m else ""
 
 
 def _has_registry(image: str) -> bool:
@@ -129,6 +139,37 @@ def _has_registry(image: str) -> bool:
     return "." in first or ":" in first or first == "localhost"
 
 
+def _collect_included_configs(config_path: Path, visited: set[Path] | None = None) -> list[Path]:
+    """Return config_path plus all transitively included configs, in include order."""
+    if visited is None:
+        visited = set()
+    resolved = config_path.resolve()
+    if resolved in visited or not resolved.exists():
+        return []
+    visited.add(resolved)
+    result = [resolved]
+    try:
+        text = resolved.read_text(errors="replace")
+    except OSError:
+        return result
+    for m in _INCLUDE_CONFIG_RE.finditer(text):
+        included = (resolved.parent / m.group(1)).resolve()
+        result.extend(_collect_included_configs(included, visited))
+    return result
+
+
+def _flatten_params(d: dict, prefix: str = "") -> dict[str, str]:
+    """Recursively flatten a nested params dict into dotted keys."""
+    result: dict[str, str] = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, str):
+            result[key] = v
+        elif isinstance(v, dict):
+            result.update(_flatten_params(v, key))
+    return result
+
+
 def _detect_containers(
     repo_path: Path,
     parser: NextflowConfigParser,
@@ -136,23 +177,38 @@ def _detect_containers(
     seen: dict[str, None] = {}
     unresolved: list[str] = []
 
-    for path in sorted(repo_path.rglob("*.nf")) + sorted(repo_path.rglob("*.config")):
+    # First pass: collect params. Follow includeConfig from nextflow.config first
+    # (preserving include order), then fall back to rglob for any remaining configs.
+    global_params: dict[str, str] = {}
+    included: list[Path] = []
+    main_config = repo_path / "nextflow.config"
+    if main_config.exists():
+        included = _collect_included_configs(main_config)
+    included_set = set(included)
+    remaining = sorted(p.resolve() for p in repo_path.rglob("*.config") if p.resolve() not in included_set)
+
+    for path in included + remaining:
         try:
             text = path.read_text(errors="replace")
         except OSError:
             continue
+        blocks = parser.parse(text)
+        raw_params = blocks.get("params", {})
+        if isinstance(raw_params, dict):
+            global_params.update(_flatten_params(raw_params))
+        blocks_no_params = {k: v for k, v in blocks.items() if k != "params"}
+        for container_val in NextflowConfigParser.get_all(blocks_no_params, "container"):
+            if _is_docker_image(container_val):
+                seen.setdefault(container_val, None)
+        _extract_containers(text, global_params, seen, unresolved)
 
-        params: dict[str, str] = {}
-        if path.suffix == ".config":
-            blocks = parser.parse(text)
-            raw_params = blocks.get("params", {})
-            if isinstance(raw_params, dict):
-                params = {k: v for k, v in raw_params.items() if isinstance(v, str)}
-            for container_val in NextflowConfigParser.get_all(blocks, "container"):
-                if _is_docker_image(container_val):
-                    seen.setdefault(container_val, None)
-
-        _extract_containers(text, params, seen, unresolved)
+    # Second pass: process .nf files with the full accumulated params.
+    for path in sorted(repo_path.rglob("*.nf")):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        _extract_containers(text, global_params, seen, unresolved)
 
     return list(seen.keys()), unresolved
 
